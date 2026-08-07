@@ -7,7 +7,7 @@ Predicting used car selling prices from listing details, using CatBoost/LightGBM
 - **Target:** `selling_price`, log-transformed (`log1p`) to handle right-skew, reversed (`expm1`) for reporting
 - **Data:** [Car details v3 dataset](https://www.kaggle.com/datasets/sajaabdalaal/car-details-v3csv) — used car listings with specs, mileage, ownership history, and selling price
 - **Models:** Random Forest, XGBoost, LightGBM, CatBoost — CatBoost/LightGBM tuned via `RandomizedSearchCV`, whichever wins becomes the saved model
-- **Served via:** FastAPI, with bounds validation, API key auth, rate limiting, and error handling
+- **Served via:** FastAPI, with bounds validation, one-hot consistency checks, API key auth, rate limiting, and error handling
 
 ## Pipeline
 
@@ -19,10 +19,10 @@ Predicting used car selling prices from listing details, using CatBoost/LightGBM
 6. Impute missing `mileage`/`engine`/`max_power` (mean) and `seats` (mode) — all fit on the training split only
 7. Remove outliers via IQR bounds on `selling_price`, computed from the training split only
 8. Encode `transmission`/`owner` as ordinal, one-hot encode `fuel`/`seller_type`
-9. Compare all 5 models untuned via 10-fold CV, then tune CatBoost and LightGBM (the two strongest performers) via `RandomizedSearchCV`
+9. Compare all 4 models untuned via 10-fold CV, then tune CatBoost and LightGBM (the two strongest performers) via `RandomizedSearchCV`
 10. Evaluate the winning model on a held-out test set, reporting R² in log-space and RMSE/MAE in actual currency units
 11. Extract feature importance, branching on which model actually won — `CatBoostRegressor.get_feature_importance(Pool)` is CatBoost-only and would `AttributeError` if `LGBMRegressor` won instead, so this is handled with an if/else rather than assuming CatBoost always wins
-12. Save the model bundle (model, fill values, feature columns, target transform, winning model name) for serving
+12. Save the model bundle (model, fill values, feature columns, target transform, winning model name) to `car_price_{winner}_model.pkl` — the filename itself reflects which model won, rather than being hardcoded to one
 
 ## A Known Limitation, Left Deliberately Unfixed
 
@@ -41,7 +41,10 @@ The saved model bundle includes everything the API needs to reproduce the traini
 - `winner` (which model — `"catboost"` or `"lgbm"` — is actually saved, useful since either can win)
 
 The API (`main.py`) includes:
-- Field-level bounds validation (e.g. `km_driven` 0–500,000, `mileage` 0–50 kmpl) matching the training data's realistic ranges
+- **Dynamic model loading** — finds whatever `car_price_*_model.pkl` the most recent training run produced (or reads a specific path from `CAR_PRICE_MODEL_PATH`), rather than assuming CatBoost always wins. Both the health-check and prediction responses report `model_used` so callers can see which model actually served the request.
+- **Optional-field imputation** — `mileage`, `engine`, `max_power`, and `seats` can be omitted from a request; if so, they're filled in using the same train-only `fill_values`/`seats_mode` the training pipeline persisted, rather than rejecting incomplete input outright
+- **Field-level bounds validation** (e.g. `km_driven` 0–500,000, `mileage` 0–50 kmpl) matching the training data's realistic ranges
+- **One-hot consistency checks** — rejects requests where more than one `fuel_*` or more than one `seller_type_*` flag is set to `1`. All-zero on a group is valid (it means the dropped baseline category from training's `drop_first=True`: CNG for fuel, Dealer for seller_type); more than one flag set is not something the model was ever trained to expect
 - API key authentication (fails at startup if no key is configured, rather than falling back to a guessable default)
 - Rate limiting (10 requests/minute per IP)
 - Error handling around inference (returns a clean `500` without leaking internals on unexpected failures)
@@ -58,10 +61,12 @@ The API (`main.py`) includes:
    ```
    python car_price_pipeline.py
    ```
+   This writes `car_price_{winner}_model.pkl` (e.g. `car_price_catboost_model.pkl` or `car_price_lgbm_model.pkl`, depending on which model wins that run)
 4. Create a `.env` file in this folder with your own API key:
    ```
    CAR_PRICE_API_KEY=your-own-secret-here
    ```
+   Optionally, also set `CAR_PRICE_MODEL_PATH` if you want to pin the API to a specific saved bundle rather than auto-detecting the most recently trained one
 5. Run the API:
    ```
    uvicorn main:app --reload
@@ -73,11 +78,11 @@ The API (`main.py`) includes:
 - A formal significance check (e.g. bootstrap CI) on the CatBoost-vs-LightGBM comparison, similar to the LR-vs-RF check in the heart disease project — currently the winner is decided by CV mean alone (with std reported alongside it, but no formal test)
 - Wrap preprocessing + model into a single `ColumnTransformer`/`Pipeline` object, so encoding logic can't drift out of sync between training and serving
 - Address the mileage unit-conflation issue described above
-- A saved test suite (`test_main.py`) mirroring the heart disease project's coverage: known input → stable prediction, out-of-bounds rejected, missing optional field imputed correctly, auth checks
+- A saved test suite (`test_main.py`) mirroring the heart disease project's coverage: known input → stable prediction, out-of-bounds rejected, missing optional field imputed correctly, one-hot consistency rejected, auth checks
 
 ## Files
 
 - `car_price_pipeline.py` — full training pipeline: data cleaning, imputation, outlier removal, encoding, model comparison, tuning, evaluation, model saving
 - `main.py` — FastAPI serving layer
 - `Car details v3.csv` — input data, not included in repo. Download from the Kaggle link above and place it in this folder before running `car_price_pipeline.py`
-- `car_price_catboost_model.pkl` — saved model bundle, not included in repo (generated by running `car_price_pipeline.py`)
+- `car_price_{winner}_model.pkl` — saved model bundle, not included in repo (generated by running `car_price_pipeline.py`; filename depends on which model won that training run)
