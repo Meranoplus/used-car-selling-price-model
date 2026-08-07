@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+
+# Dataset (not included in repo — see README for source)
+Car details v3.csv
+
+# Saved model artifacts
+*.pkl
+*.joblib
+
+# CatBoost training artifacts
+catboost_info/
+
+# Pytest cache
+.pytest_cache/
