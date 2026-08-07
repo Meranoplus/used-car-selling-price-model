@@ -16,13 +16,14 @@ config = {
     'random_state': 42,
     'test_size':    0.2,
     'n_splits':     10,
+    'current_year': pd.Timestamp.now().year,   
 }
 
 # ── model params (untuned, used for the initial CV comparison below) ──
 
 rf_params = {
     'n_estimators': 300,
-    'random_state': 42,
+    'random_state': config["random_state"],
     'n_jobs':       -1,
 }
 
@@ -30,7 +31,7 @@ xgb_params = {
     'n_estimators':  500,
     'learning_rate': 0.1,
     'max_depth':     6,
-    'random_state':  42,
+    'random_state':  config["random_state"],
     'n_jobs':        -1,
     'objective':     'reg:squarederror',
 }
@@ -39,7 +40,7 @@ lgbm_params = {
     'n_estimators':  500,
     'learning_rate': 0.05,
     'num_leaves':    31,
-    'random_state':  42,
+    'random_state':  config["random_state"],
     'n_jobs':        -1,
     'verbose':       -1,
     'objective':     'regression',
@@ -49,7 +50,7 @@ cat_params = {
     'iterations':    500,
     'learning_rate': 0.1,
     'depth':         6,
-    'random_state':  42,
+    'random_state':  config["random_state"],
     'verbose':       False,
     'loss_function': 'RMSE',
     'allow_writing_files': False,
@@ -89,11 +90,19 @@ df = df[df['year'] >= 2000]
 
 # Age is more directly useful to a model than a raw model year
 # (avoids the model having to learn "smaller year = older car").
-df['Car_age'] = 2024 - df['year']
+df['Car_age'] = config["current_year"] - df['year']
 df = df.drop(columns=['year'])
 
 # strip units — source columns store values as strings like "23.4 kmpl" /
 # "1248 CC" / "74 bhp"; extract just the numeric portion for modeling.
+#
+# KNOWN LIMITATION: mileage is reported in kmpl for petrol/diesel cars but
+# km/kg for CNG/LPG cars — two different physical units sharing one column.
+# This line treats them as one continuous numeric feature, silently
+# conflating a CNG car's mileage value with a diesel car's. Not fixed here
+# — would need normalizing by fuel type or excluding CNG/LPG rows from this
+# column, similar to how torque was dropped. Worth deciding on deliberately
+# before trusting mileage-related feature importance too literally.
 df['mileage'] = df['mileage'].str.extract(r'(\d+\.?\d*)').astype(float)
 df['engine']  = df['engine'].str.extract(r'(\d+\.?\d*)').astype(float)
 df['max_power'] = df['max_power'].str.extract(r'(\d+\.?\d*)').astype(float)
@@ -166,7 +175,7 @@ models = {
 
 kfold = KFold(n_splits=config["n_splits"], random_state=config["random_state"], shuffle=True)
 
-# Initial untuned comparison across all 5 candidate models — decides which
+# Initial untuned comparison across candidate models — decides which
 # ones are worth the extra time/cost of hyperparameter search below.
 for name, model in models.items():
     scores = cross_val_score(model, X_train, y_train, cv=kfold, scoring="r2")
@@ -226,9 +235,9 @@ y_test_actual = np.expm1(y_test)
 
 print("\nFINAL TEST RESULTS")
 print("=" * 50)
-print(f"R²:   {r2_score(y_test, y_pred):.4f}")
-print(f"RMSE: {root_mean_squared_error(y_test_actual, y_pred_actual):,.0f}")
-print(f"MAE:  {mean_absolute_error(y_test_actual, y_pred_actual):,.0f}")
+print(f"R²:   {r2_score(y_test, y_pred):.4f}   (log-price space — the space the model was optimized in)")
+print(f"RMSE: {root_mean_squared_error(y_test_actual, y_pred_actual):,.0f}   (actual currency units, post-expm1)")
+print(f"MAE:  {mean_absolute_error(y_test_actual, y_pred_actual):,.0f}   (actual currency units, post-expm1)")
 
 # Leakage sanity check — no single feature should dominate; a smooth,
 # spread-out correlation table is consistent with a genuine multi-factor
@@ -236,19 +245,28 @@ print(f"MAE:  {mean_absolute_error(y_test_actual, y_pred_actual):,.0f}")
 print("\ncorr:")
 print(df.corr(numeric_only=True)["selling_price"].sort_values(ascending=False).head(20))
 
-print("\n catboost feature imp")
-train_pool = Pool(X_train, y_train)
-importance = pd.Series(final_model.get_feature_importance(train_pool),index=X_train.columns)
-print(importance.sort_values(ascending=False))
+print("\nfeature importance")
+# get_feature_importance(Pool) is CatBoost-only — branch on which model
+# actually won, since lgbm can win this comparison too (LGBMRegressor
+# uses .feature_importances_ instead, no Pool argument).
+if winner == "catboost":
+    train_pool = Pool(X_train, y_train)
+    importance = pd.Series(final_model.get_feature_importance(train_pool), index=X_train.columns)
+else:
+    importance = pd.Series(final_model.feature_importances_, index=X_train.columns)
+print(importance.sort_values(ascending=False).head(15))
 
 # Persist everything a live API needs to reproduce this exact pipeline at
 # inference time: the model itself, plus every train-only statistic used
-# for imputation, plus the exact column order the model expects.
-out_path = "car_price_catboost_model.pkl"
+# for imputation, plus the exact column order the model expects, plus
+# metadata so a loader doesn't need tribal knowledge of this script.
+out_path = f"car_price_{winner}_model.pkl"
 joblib.dump({
-    "model":            final_model,
-    "fill_values":      fill_values,
-    "seats_mode":       seats_mode,
-    "feature_columns":  list(X_train.columns),
+    "model":             final_model,
+    "winner":            winner,               # "catboost" or "lgbm" — which model this actually is
+    "fill_values":       fill_values,
+    "seats_mode":        seats_mode,
+    "feature_columns":   list(X_train.columns),
+    "target_transform":  "log1p",               # predictions need np.expm1() applied — self-documenting now
 }, out_path)
 print("Model saved!")
