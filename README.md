@@ -1,12 +1,12 @@
 # Used Car Price Prediction
 
-Predicting used car selling prices from listing details, using CatBoost/LightGBM (tuned via RandomizedSearchCV) benchmarked against Random Forest and XGBoost — served through a FastAPI endpoint.
+Predicting used car selling prices from listing details, using Random Forest, XGBoost, LightGBM, and CatBoost — the two strongest performers get tuned via RandomizedSearchCV — served through a FastAPI endpoint.
 
 ## Overview
 
 - **Target:** `selling_price`, log-transformed (`log1p`) to handle right-skew, reversed (`expm1`) for reporting
 - **Data:** [Car details v3 dataset](https://www.kaggle.com/datasets/sajaabdalaal/car-details-v3csv) — used car listings with specs, mileage, ownership history, and selling price
-- **Models:** Random Forest, XGBoost, LightGBM, CatBoost — CatBoost/LightGBM tuned via `RandomizedSearchCV`, whichever wins becomes the saved model
+- **Models:** Random Forest, XGBoost, LightGBM, CatBoost — all 4 compared untuned via 10-fold CV, then whichever *two* scored highest get tuned via `RandomizedSearchCV`, and whichever of those two wins becomes the saved model. Not hardcoded to CatBoost/LightGBM — the winners are decided from the actual CV scores each run, so RF or XGB could in principle be the ones tuned and saved.
 - **Served via:** FastAPI, with bounds validation, one-hot consistency checks, API key auth, rate limiting, and error handling
 
 ## Pipeline
@@ -19,10 +19,10 @@ Predicting used car selling prices from listing details, using CatBoost/LightGBM
 6. Impute missing `mileage`/`engine`/`max_power` (mean) and `seats` (mode) — all fit on the training split only
 7. Remove outliers via IQR bounds on `selling_price`, computed from the training split only
 8. Encode `transmission`/`owner` as ordinal, one-hot encode `fuel`/`seller_type`
-9. Compare all 4 models untuned via 10-fold CV, then tune CatBoost and LightGBM (the two strongest performers) via `RandomizedSearchCV`
+9. Compare all 4 models untuned via 10-fold CV, then tune whichever two scored highest (decided from the actual CV means, not assumed ahead of time) via `RandomizedSearchCV`
 10. Evaluate the winning model on a held-out test set, reporting R² in log-space and RMSE/MAE in actual currency units
-11. Extract feature importance, branching on which model actually won — `CatBoostRegressor.get_feature_importance(Pool)` is CatBoost-only and would `AttributeError` if `LGBMRegressor` won instead, so this is handled with an if/else rather than assuming CatBoost always wins
-12. Save the model bundle (model, fill values, feature columns, target transform, winning model name) to `car_price_{winner}_model.pkl` — the filename itself reflects which model won, rather than being hardcoded to one
+11. Extract feature importance, branching on which model actually won — `CatBoostRegressor.get_feature_importance(Pool)` is CatBoost-only and would `AttributeError` for any of the other three models, so this is handled with an if/else (CatBoost vs. everyone else's `.feature_importances_`) rather than assuming CatBoost always wins
+12. Save the model bundle (model, fill values, feature columns, target transform, training year, winning model name) to `car_price_{winner}_model.pkl` — the filename itself reflects which model won, rather than being hardcoded to one
 
 ## A Known Limitation, Left Deliberately Unfixed
 
@@ -38,7 +38,8 @@ The saved model bundle includes everything the API needs to reproduce the traini
 - `seats_mode`
 - `feature_columns` (exact column order the model expects)
 - `target_transform` (`"log1p"`, so predictions are known to need `expm1()` reversal — not tribal knowledge)
-- `winner` (which model — `"catboost"` or `"lgbm"` — is actually saved, useful since either can win)
+- `winner` (which model — `"rf"`, `"xgb"`, `"catboost"`, or `"lgbm"` — is actually saved, useful since any of the four can win)
+- `training_year` (the year `Car_age` was computed relative to during training — the API reads this instead of recomputing "now" at serving time, so its guidance doesn't silently drift once the model has been running a while without a retrain)
 
 The API (`main.py`) includes:
 - **Dynamic model loading** — finds whatever `car_price_*_model.pkl` the most recent training run produced (or reads a specific path from `CAR_PRICE_MODEL_PATH`), rather than assuming CatBoost always wins. Both the health-check and prediction responses report `model_used` so callers can see which model actually served the request.
@@ -59,9 +60,9 @@ The API (`main.py`) includes:
 2. Download the dataset from the Kaggle link above and place `Car details v3.csv` in this folder
 3. Run the training pipeline to generate the saved model:
    ```
-   python car_price_pipeline.py
+   python pipeline.py
    ```
-   This writes `car_price_{winner}_model.pkl` (e.g. `car_price_catboost_model.pkl` or `car_price_lgbm_model.pkl`, depending on which model wins that run)
+   This writes `car_price_{winner}_model.pkl` (e.g. `car_price_catboost_model.pkl`, `car_price_lgbm_model.pkl`, `car_price_rf_model.pkl`, or `car_price_xgb_model.pkl`, depending on which model wins that run)
 4. Create a `.env` file in this folder with your own API key:
    ```
    CAR_PRICE_API_KEY=your-own-secret-here
@@ -82,7 +83,7 @@ The API (`main.py`) includes:
 
 ## Files
 
-- `car_price_pipeline.py` — full training pipeline: data cleaning, imputation, outlier removal, encoding, model comparison, tuning, evaluation, model saving
+- `pipeline.py` — full training pipeline: data cleaning, imputation, outlier removal, encoding, model comparison, tuning, evaluation, model saving
 - `main.py` — FastAPI serving layer
-- `Car details v3.csv` — input data, not included in repo. Download from the Kaggle link above and place it in this folder before running `car_price_pipeline.py`
-- `car_price_{winner}_model.pkl` — saved model bundle, not included in repo (generated by running `car_price_pipeline.py`; filename depends on which model won that training run)
+- `Car details v3.csv` — input data, not included in repo. Download from the Kaggle link above and place it in this folder before running `pipeline.py`
+- `car_price_{winner}_model.pkl` — saved model bundle, not included in repo (generated by running `pipeline.py`; filename depends on which model won that training run)
