@@ -83,7 +83,7 @@ The API (`main.py`) includes:
 
 ## Disclaimer
 
-Built with AI assistance (Claude) for code generation and review; design decisions, debugging, and the fixes documented below are my own.
+Built with AI assistance (Claude/Kimi) for code generation and review; design decisions, debugging, and the fixes documented below are my own.
 
 ## Files
 
