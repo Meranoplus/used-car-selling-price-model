@@ -57,9 +57,22 @@ target_transform = bundle.get("target_transform", "log1p")
 logger.info("Loaded %s model (%s) from %s", winner, target_transform, MODEL_PATH)
 
 # training script computes Car_age as config["current_year"] - year at whatever
-# moment the model was last trained — expose that so the API description/bounds
-# don't silently go stale the way a hardcoded "2024" would.
-MODEL_TRAINING_YEAR = pd.Timestamp.now().year
+# moment the model was actually trained, and persists that year in the bundle
+# (see "training_year" in the joblib.dump). Read it from there rather than
+# recomputing pd.Timestamp.now().year here — "now" is when the API *started*,
+# not when the model was *trained*, and those drift apart the longer a model
+# runs without being retrained. Falls back to "now" with a warning only for
+# bundles saved before this fix, which won't have the key.
+if "training_year" in bundle:
+    MODEL_TRAINING_YEAR = bundle["training_year"]
+else:
+    MODEL_TRAINING_YEAR = pd.Timestamp.now().year
+    logger.warning(
+        "Bundle at %s has no 'training_year' (trained before this fix) — "
+        "falling back to the current year (%d), which may not be when this "
+        "model was actually trained. Retrain to embed the real year.",
+        MODEL_PATH, MODEL_TRAINING_YEAR,
+    )
 
 # ── API key auth ────────────────────────────────────────────
 # Fails at startup rather than falling back to a guessable default.
