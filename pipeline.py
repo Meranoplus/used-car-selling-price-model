@@ -56,8 +56,24 @@ cat_params = {
     'allow_writing_files': False,
 }
 
-# RandomizedSearchCV grids — only CatBoost and LightGBM get tuned below,
-# since they came out ahead in the initial untuned CV comparison.
+# RandomizedSearchCV grids for every candidate model — which two actually
+# get tuned is decided at runtime from the untuned CV comparison below,
+# not assumed ahead of time.
+rf_grid = {
+    'n_estimators':      [200, 300, 500],
+    'max_depth':          [None, 10, 20, 30],
+    'min_samples_split':  [2, 5, 10],
+    'min_samples_leaf':   [1, 2, 4],
+}
+
+xgb_grid = {
+    'n_estimators':      [300, 500, 700],
+    'learning_rate':      [0.01, 0.05, 0.1],
+    'max_depth':          [4, 6, 8, 10],
+    'subsample':          [0.7, 0.85, 1.0],
+    'colsample_bytree':   [0.7, 0.85, 1.0],
+}
+
 cat_grid = {
     'iterations':    [300, 500, 700],
     'learning_rate': [0.01, 0.05, 0.1],
@@ -71,6 +87,22 @@ lgbm_grid = {
     'num_leaves':    [31, 63, 127],
     'max_depth':     [-1, 6, 8, 10],
     'min_child_samples': [10, 20, 30],
+}
+
+# Fresh (unfitted) estimator per model name, used to build whichever two
+# RandomizedSearchCV ends up tuning below.
+model_builders = {
+    "rf":       lambda: RandomForestRegressor(random_state=config["random_state"], n_jobs=-1),
+    "xgb":      lambda: XGBRegressor(random_state=config["random_state"], n_jobs=-1, objective="reg:squarederror"),
+    "catboost": lambda: CatBoostRegressor(verbose=False, allow_writing_files=False, random_state=config["random_state"]),
+    "lgbm":     lambda: LGBMRegressor(verbose=-1, random_state=config["random_state"]),
+}
+
+param_grids = {
+    "rf":       rf_grid,
+    "xgb":      xgb_grid,
+    "catboost": cat_grid,
+    "lgbm":     lgbm_grid,
 }
 
 df = pd.read_csv("Car details v3.csv")
@@ -95,7 +127,7 @@ df = df.drop(columns=['year'])
 
 # strip units — source columns store values as strings like "23.4 kmpl" /
 # "1248 CC" / "74 bhp"; extract just the numeric portion for modeling.
-#
+
 # KNOWN LIMITATION: mileage is reported in kmpl for petrol/diesel cars but
 # km/kg for CNG/LPG cars — two different physical units sharing one column.
 # This line treats them as one continuous numeric feature, silently
@@ -175,53 +207,45 @@ models = {
 
 kfold = KFold(n_splits=config["n_splits"], random_state=config["random_state"], shuffle=True)
 
-# Initial untuned comparison across candidate models — decides which
-# ones are worth the extra time/cost of hyperparameter search below.
+# Initial untuned comparison across all 4 candidate models — the two with
+# the highest mean CV R2 here are the ones that get tuned below. This is
+# decided from the actual scores, not assumed ahead of time (e.g. RF/XGB
+# could in principle beat CatBoost/LGBM on a different data pull).
+cv_scores = {}
 for name, model in models.items():
     scores = cross_val_score(model, X_train, y_train, cv=kfold, scoring="r2")
-
+    cv_scores[name] = scores.mean()
     print(f"{name}: R2 = {scores.mean():.4f} (+/- {scores.std():.4f})")
 
-# Only CatBoost and LightGBM get tuned — RandomizedSearchCV (not
-# GridSearchCV) is used here since each grid has hundreds of combinations,
-# too many to search exhaustively; n_iter=20 samples a fixed subset instead.
-catboost_rscv = RandomizedSearchCV(
-    estimator=CatBoostRegressor(verbose=False, allow_writing_files=False, random_state=config["random_state"]),
-    param_distributions=cat_grid,
-    n_iter=20, cv=kfold,
-    scoring="r2",
-    n_jobs=-1, refit=True, verbose=0,
-    random_state=config["random_state"]
-)
+top2 = sorted(cv_scores, key=cv_scores.get, reverse=True)[:2]
+print(f"\nTuning the top 2 performers from the untuned comparison: {top2}")
 
-lgbm_rscv = RandomizedSearchCV(
-    estimator=LGBMRegressor(verbose=-1, random_state=config["random_state"]),
-    param_distributions=lgbm_grid,
-    n_iter=20, cv=kfold,
-    scoring="r2",
-    n_jobs=-1, refit=True, verbose=0,
-    random_state=config["random_state"]
-)
+# RandomizedSearchCV (not GridSearchCV) is used here since each grid has
+# hundreds of combinations, too many to search exhaustively; n_iter=20
+# samples a fixed subset instead.
+searches = {}
+for name in top2:
+    search = RandomizedSearchCV(
+        estimator=model_builders[name](),
+        param_distributions=param_grids[name],
+        n_iter=20, cv=kfold,
+        scoring="r2",
+        n_jobs=-1, refit=True, verbose=0,
+        random_state=config["random_state"]
+    )
+    search.fit(X_train, y_train)
+    searches[name] = search
+    print(f"  {name} best r2 (CV): {search.best_score_:.4f}")
 
-catboost_rscv.fit(X_train, y_train)
-print(f"  CatBoost best r2 (CV): {catboost_rscv.best_score_:.4f}")
+# Report each tuned model's CV standard deviation alongside its score — a
+# higher mean with much higher variance isn't automatically the better pick.
+print()
+for name, search in searches.items():
+    std = search.cv_results_['std_test_score'][search.best_index_]
+    print(f"{name}: {search.best_score_:.4f} ± {std:.4f}")
 
-lgbm_rscv.fit(X_train, y_train)
-print(f"  lgbm best r2 (CV): {lgbm_rscv.best_score_:.4f}")
-
-# Report each model's CV standard deviation alongside its score — a higher
-# mean with much higher variance isn't automatically the better pick.
-cat_std  = catboost_rscv.cv_results_['std_test_score'][catboost_rscv.best_index_]
-lgbm_std = lgbm_rscv.cv_results_['std_test_score'][lgbm_rscv.best_index_]
-print(f"\nCatBoost: {catboost_rscv.best_score_:.4f} ± {cat_std:.4f}")
-print(f"LGBM:     {lgbm_rscv.best_score_:.4f} ± {lgbm_std:.4f}")
-
-
-if catboost_rscv.best_score_  >= lgbm_rscv.best_score_:
-    winner, final_model = "catboost", catboost_rscv.best_estimator_
-
-else: 
-    winner, final_model = "lgbm", lgbm_rscv.best_estimator_
+winner = max(searches, key=lambda n: searches[n].best_score_)
+final_model = searches[winner].best_estimator_
 print(f"\nWinner: {winner}")
 
 # Final holdout evaluation — first time X_test/y_test are touched at all,
@@ -262,11 +286,15 @@ print(importance.sort_values(ascending=False).head(15))
 # metadata so a loader doesn't need tribal knowledge of this script.
 out_path = f"car_price_{winner}_model.pkl"
 joblib.dump({
-    "model":             final_model,
-    "winner":            winner,               # "catboost" or "lgbm" — which model this actually is
+    "model":             final_model, 
+    "winner":            winner,                    # "rf", "xgb", "catboost", or "lgbm" — whichever two models
+                                                    # won the untuned CV comparison and then won the tuned one
     "fill_values":       fill_values,
     "seats_mode":        seats_mode,
     "feature_columns":   list(X_train.columns),
-    "target_transform":  "log1p",               # predictions need np.expm1() applied — self-documenting now
+    "target_transform":  "log1p",                   # predictions need np.expm1() applied — self-documenting now
+    "training_year":     config["current_year"],    # the year Car_age was computed relative to — the
+                                                    # API needs this, not "now" at serving time, or
+                                                    # Car_age guidance drifts wrong after the model ages
 }, out_path)
 print("Model saved!")
